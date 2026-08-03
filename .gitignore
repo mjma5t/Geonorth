@@ -1,0 +1,23 @@
+# data
+CTSM_data/
+ERA5/
+Observational_data/
+
+# outputs
+run_0/
+run_1/
+run_1a/
+run_2/
+*.png
+
+# python
+__pycache__/
+.venv/
+.ipynb_checkpoints/
+
+# data files anywhere
+*.nc
+*.nc4
+*.h5
+*.tif
+tests/test_folder/
