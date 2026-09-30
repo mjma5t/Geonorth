@@ -4,6 +4,14 @@ import xarray as xr
 import pandas as pd
 import numpy as np
 
+def test_function():
+    print("redid it")
+
+def call_obs(site, vari):
+    ds_obs = xr.open_dataset(f"C:/Users/madel/Code/GeoNorth/Observational_data/{site}_obs/processed/{site}_{vari}.nc")
+    obs = ds_obs[f"{vari}"]
+    obs = obs.sortby("depth")
+    return obs
 
 def interpolate_to_depth(ds, target_depths, depth_dim="levgrnd", var="TSOI"):
     sm = ds[var].squeeze()
@@ -27,10 +35,10 @@ def interpolate_to_depth(ds, target_depths, depth_dim="levgrnd", var="TSOI"):
 
     interpolated_da = xr.DataArray(
         interpolated_np,
-        dims=["time", "depth"],
+        dims=["time", "levgrnd"],
         coords={
             "time":  time,
-            "depth": target_depths.values,
+            "levgrnd": target_depths.values,
         },
         name=var,
         attrs={"units": "K"},
@@ -42,12 +50,43 @@ def interpolate_to_depth(ds, target_depths, depth_dim="levgrnd", var="TSOI"):
     return interpolated_da
 
 
+# levgrnd based functions
+def final_plot_tsoi(sim, site, depths, vari, show=0):
+    
+    obs = call_obs(site, vari)
 
-def final_plot_tsoi(obs, sim, site, depths, vari, show=0):
     # Resample observational data to daily frequency
     obs_daily = obs.resample(time="1D").mean()
 
-    for x in depths:
+    # Water-year order: Sep -> Aug, to match the seasonal plots
+    month_order = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8]
+    seasons = ["Fall", "Winter", "Spring", "Summer"]
+    season_months = {"Fall": (9,10,11), "Winter": (12,1,2), "Spring": (3,4,5), "Summer": (6,7,8)}
+
+    depth_vals = [round(float(x.values), 2) for x in depths]
+    rmse_arr = np.full((len(depth_vals), len(month_order)), np.nan)
+    seasonal_rmse_arr = np.full((len(depth_vals), len(seasons)), np.nan)
+    full_rmse_arr = np.full(len(depth_vals), np.nan)
+    months = obs_daily["time"].dt.month.values
+
+    for i, x in enumerate(depths):
+
+        act_val = depth_vals[i]
+
+        obs_vals = obs_daily.sel(depth=x.values, method = "nearest").values
+        sim_vals = sim.sel(levgrnd=act_val, method = "nearest").values
+        mask = ~(np.isnan(obs_vals) | np.isnan(sim_vals))
+        RMSE = np.sqrt(np.average((obs_vals[mask] - sim_vals[mask])**2))
+        full_rmse_arr[i] = RMSE
+
+        for j, m in enumerate(month_order):
+            mmask = mask & (months == m)
+            rmse_arr[i, j] = np.sqrt(np.average((obs_vals[mmask] - sim_vals[mmask])**2))
+
+        for k, sname in enumerate(seasons):
+            smask = mask & np.isin(months, season_months[sname])
+            seasonal_rmse_arr[i, k] = np.sqrt(np.average((obs_vals[smask] - sim_vals[smask])**2))
+
 
         plt.figure(figsize=(14,6))
 
@@ -60,17 +99,16 @@ def final_plot_tsoi(obs, sim, site, depths, vari, show=0):
         )
 
         # Simulated
-        act_val = round(float(x.values),2)
         plt.plot(
             sim["time"].values,
-            sim.sel(depth=act_val, method = "nearest").values,
+            sim.sel(levgrnd=act_val, method = "nearest").values,
             label="Simulated",
             linewidth=2
         )
 
         # Labeling
         remain = int(round(x.values - act_val,3)*1000)
-    
+
         plt.xlabel("Time")
         plt.ylabel(f"{vari}")
         plt.title(f"{vari} at {site} - {act_val*100:.0f}cm")
@@ -80,8 +118,19 @@ def final_plot_tsoi(obs, sim, site, depths, vari, show=0):
         if not show:
             plt.close()
 
+    rmse_ds = xr.Dataset(
+        {
+            "RMSE_monthly": (["depth", "month"], rmse_arr),
+            "RMSE_seasonal": (["depth", "season"], seasonal_rmse_arr),
+            "RMSE_full": (["depth"], full_rmse_arr),
+        },
+        coords={"depth": depths, "month": month_order, "season": seasons},
+    )
+
+    return rmse_ds
 
 
+#levsoi based functions
 def final_plot_h2osoi(obs, sim, site, depths, vari, show=0):
     # Resample observational data to daily frequency
     obs_daily = obs.resample(time="1D").mean()
@@ -213,10 +262,6 @@ def final_plot_sd(obs, sim, era, site, depths, vari, show=0):
 
 
 def august_profile_tsoi(obs, sim, site, depths, vari, show=0):
-    """
-    Plot a soil temperature-vs-depth profile averaged over August,
-    comparing observed and simulated values.
-    """
     # Resample obs to daily (same as final_plot_tsoi)
     obs_daily = obs.resample(time="1D").mean()
 
@@ -230,27 +275,43 @@ def august_profile_tsoi(obs, sim, site, depths, vari, show=0):
     depth_cm = []
     obs_vals = []
     sim_vals = []
+    obs_n = []
+    sim_n = []
 
     for x in depths:
         #print(x)
         act_val = round(float(x.values), 2)
         depth_cm.append(act_val * 100)
 
-        obs_vals.append(
-            obs_aug.sel(depth=x.values, method="nearest").mean(skipna=True).values
-        )
-        sim_vals.append(
-            sim_aug.sel(levgrnd=act_val, method="nearest").mean(skipna=True).values
-        )
+        obs_arr = obs_aug.sel(depth=x.values, method="nearest").values
+        sim_arr = sim_aug.sel(levgrnd=act_val, method="nearest").values
+        obs_arr = obs_arr[~np.isnan(obs_arr)]
+        sim_arr = sim_arr[~np.isnan(sim_arr)]
+
+        obs_vals.append(np.mean(obs_arr) if len(obs_arr) else np.nan)
+        sim_vals.append(np.mean(sim_arr) if len(sim_arr) else np.nan)
+        obs_n.append(len(obs_arr))
+        sim_n.append(len(sim_arr))
+
+    obs_n = np.array(obs_n, dtype=float)
+    sim_n = np.array(sim_n, dtype=float)
+
+    # Map sample size -> marker area (points^2), floored so low-N points stay visible
+    def size_from_n(n, min_size=20, max_size=200):
+        max_n = max(n.max(), 1)
+        return min_size + (max_size - min_size) * (n / max_n)
 
     plt.figure(figsize=(6, 8))
-    plt.plot(obs_vals, depth_cm, "o-", label="Observed", linewidth=2)
-    plt.plot(sim_vals, depth_cm, "s-", label="Simulated", linewidth=2)
+    plt.plot(obs_vals, depth_cm, "-", color="tab:blue", linewidth=2, label="Observed", zorder=2)
+    plt.scatter(obs_vals, depth_cm, s=size_from_n(obs_n), color="tab:blue", zorder=3, edgecolor="white", linewidth=0.5)
 
-    plt.gca().invert_yaxis()  # depth increases downward
+    plt.plot(sim_vals, depth_cm, "-o", color="tab:orange", linewidth=2, label="Simulated", zorder=2)
+    
+    plt.gca().invert_yaxis()
     plt.xlabel(f"{vari}")
     plt.ylabel("Depth (cm)")
     plt.title(f"{vari} Profile at {site} - August Average")
+    plt.figtext(0.5, 0.01, "Marker size scales with sample size (N)", ha="center", fontsize=8)
     plt.grid(True)
     plt.legend()
     plt.savefig(f"v1.0_final_images/{site}/{vari}/{site}_{vari}_profile.png")
@@ -258,7 +319,7 @@ def august_profile_tsoi(obs, sim, site, depths, vari, show=0):
         plt.close()
 
 
-
+# Update to show N with size of point
 def clean_august_profile_tsoi(obs, sim, site, depths, vari, show=0):
     # Resample obs to daily (same as final_plot_tsoi)
     obs_daily = obs.resample(time="1D").mean()
@@ -270,31 +331,47 @@ def clean_august_profile_tsoi(obs, sim, site, depths, vari, show=0):
     # Convert K → °C
     sim_aug = sim_aug - 273.15
 
-    profile_data = {}  # act_val -> (obs_val, sim_val, raw_xval)
+    profile_data = {}  # act_val -> (obs_val, sim_val, raw_xval, obs_n, sim_n)
     for x in depths:
         act_val = round(float(x.values), 2)
-        obs_val = obs_aug.sel(depth=x.values, method="nearest").mean(skipna=True).values
-        sim_val = sim_aug.sel(levgrnd=act_val, method="nearest").mean(skipna=True).values
+
+        obs_arr = obs_aug.sel(depth=x.values, method="nearest").values
+        sim_arr = sim_aug.sel(levgrnd=act_val, method="nearest").values
+        obs_arr = obs_arr[~np.isnan(obs_arr)]
+        sim_arr = sim_arr[~np.isnan(sim_arr)]
+
+        obs_val = np.mean(obs_arr) if len(obs_arr) else np.nan
+        sim_val = np.mean(sim_arr) if len(sim_arr) else np.nan
 
         if act_val not in profile_data or abs(obs_val - sim_val) < abs(
             profile_data[act_val][0] - profile_data[act_val][1]
         ):
-            profile_data[act_val] = (obs_val, sim_val, float(x.values))
+            profile_data[act_val] = (obs_val, sim_val, float(x.values), len(obs_arr), len(sim_arr))
 
     sorted_depths = sorted(profile_data)
     depth_cm = [d * 100 for d in sorted_depths]
     obs_vals = [profile_data[d][0] for d in sorted_depths]
     sim_vals = [profile_data[d][1] for d in sorted_depths]
+    obs_n = np.array([profile_data[d][3] for d in sorted_depths], dtype=float)
+    sim_n = np.array([profile_data[d][4] for d in sorted_depths], dtype=float)
 
     used_xvals = [profile_data[d][2] for d in sorted_depths]
 
+    def size_from_n(n, min_size=20, max_size=200):
+        max_n = max(n.max(), 1)
+        return min_size + (max_size - min_size) * (n / max_n)
+
     plt.figure(figsize=(6, 8))
-    plt.plot(obs_vals, depth_cm, "o-", label="Observed", linewidth=2)
-    plt.plot(sim_vals, depth_cm, "s-", label="Simulated", linewidth=2)
-    plt.gca().invert_yaxis()  # depth increases downward
+    plt.plot(obs_vals, depth_cm, "-", color="tab:blue", linewidth=2, label="Observed", zorder=2)
+    plt.scatter(obs_vals, depth_cm, s=size_from_n(obs_n), color="tab:blue", zorder=3, edgecolor="white", linewidth=0.5)
+
+    plt.plot(sim_vals, depth_cm, "-", color="tab:orange", linewidth=2, label="Simulated", zorder=2)
+
+    plt.gca().invert_yaxis()
     plt.xlabel(f"{vari}")
     plt.ylabel("Depth (cm)")
     plt.title(f"{vari} Profile at {site} - August Average")
+    plt.figtext(0.5, 0.01, "Marker size scales with sample size (N)", ha="center", fontsize=8)
     plt.grid(True)
     plt.legend()
     plt.savefig(f"v1.0_final_images/{site}/{vari}/clean_{site}_{vari}_profile.png")
@@ -315,7 +392,7 @@ def single_seasonal_cycle_tsoi(obs, sim_c, site, used_xvals, vari, show=0):
     sim_depth_list = []
     for dep in used_xvals:
         obs_depth_list.append(obs_daily.sel(depth=dep, method="nearest"))
-        sim_depth_list.append(sim_c.sel(depth=dep, method="nearest"))
+        sim_depth_list.append(sim_c.sel(levgrnd=dep, method="nearest"))
 
     obs_avg = xr.concat(obs_depth_list, dim="depth_sel").mean(dim="depth_sel", skipna=True)
     sim_avg = xr.concat(sim_depth_list, dim="depth_sel").mean(dim="depth_sel", skipna=True)
@@ -328,8 +405,8 @@ def single_seasonal_cycle_tsoi(obs, sim_c, site, used_xvals, vari, show=0):
     month_order = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8]
     month_labels = ["S", "O", "N", "D", "J", "F", "M", "A", "M", "J", "J", "A"]
 
-    obs_mean, obs_min, obs_max = [], [], []
-    sim_mean, sim_min, sim_max = [], [], []
+    obs_mean, obs_std = [], []
+    sim_mean, sim_std = [], []
 
     for m in month_order:
         ov = obs_monthly.sel(time=obs_monthly["time"].dt.month == m).values
@@ -338,21 +415,25 @@ def single_seasonal_cycle_tsoi(obs, sim_c, site, used_xvals, vari, show=0):
         sv = sv[~np.isnan(sv)]
 
         obs_mean.append(np.mean(ov) if len(ov) else np.nan)
-        obs_min.append(np.min(ov) if len(ov) else np.nan)
-        obs_max.append(np.max(ov) if len(ov) else np.nan)
+        obs_std.append(np.std(ov, ddof=1) if len(ov) > 1 else 0.0)
 
         sim_mean.append(np.mean(sv) if len(sv) else np.nan)
-        sim_min.append(np.min(sv) if len(sv) else np.nan)
-        sim_max.append(np.max(sv) if len(sv) else np.nan)
+        sim_std.append(np.std(sv, ddof=1) if len(sv) > 1 else 0.0)
+
+    obs_mean, obs_std = np.array(obs_mean), np.array(obs_std)
+    sim_mean, sim_std = np.array(sim_mean), np.array(sim_std)
 
     x = np.arange(len(month_order))
 
     plt.figure(figsize=(8, 5))
     plt.plot(x, obs_mean, "-", color="gray", label="Observed", linewidth=2)
-    plt.fill_between(x, obs_min, obs_max, color="gray", alpha=0.3)
+    # Wider band first (2 sigma), narrower band drawn on top (1 sigma)
+    plt.fill_between(x, obs_mean - 2 * obs_std, obs_mean + 2 * obs_std, color="gray", alpha=0.15)
+    plt.fill_between(x, obs_mean - obs_std, obs_mean + obs_std, color="gray", alpha=0.3)
 
     plt.plot(x, sim_mean, "-", color="crimson", label="Simulated", linewidth=2)
-    plt.fill_between(x, sim_min, sim_max, color="crimson", alpha=0.3)
+    plt.fill_between(x, sim_mean - 2 * sim_std, sim_mean + 2 * sim_std, color="crimson", alpha=0.15)
+    plt.fill_between(x, sim_mean - sim_std, sim_mean + sim_std, color="crimson", alpha=0.3)
 
     plt.xticks(x, month_labels)
     plt.xlabel("Month")
@@ -363,6 +444,7 @@ def single_seasonal_cycle_tsoi(obs, sim_c, site, used_xvals, vari, show=0):
     plt.savefig(f"v1.0_final_images/{site}/{vari}/{site}_{vari}_full_seasonal.png")
     if not show:
         plt.close()
+
 
 def seasonal_plot_tsoi(obs, sim, site, depths, vari, show=0):
     # Resample obs to daily
@@ -381,14 +463,14 @@ def seasonal_plot_tsoi(obs, sim, site, depths, vari, show=0):
 
         # Monthly means, one value per year per month
         obs_sel = obs_daily.sel(depth=depth_x.values, method="nearest")
-        sim_sel = sim.sel(depth=act_val, method="nearest")
-        sim_depth = sim_sel.depth.values
+        sim_sel = sim.sel(levgrnd=act_val, method="nearest")
+        sim_depth = sim_sel.levgrnd.values
 
         obs_monthly = obs_sel.resample(time="ME").mean(skipna=True)
         sim_monthly = sim_sel.resample(time="ME").mean(skipna=True)
 
-        obs_mean, obs_min, obs_max = [], [], []
-        sim_mean, sim_min, sim_max = [], [], []
+        obs_mean, obs_std = [], []
+        sim_mean, sim_std = [], []
 
         #could be cleaned up but whatever for now
         for m in month_order:
@@ -400,13 +482,16 @@ def seasonal_plot_tsoi(obs, sim, site, depths, vari, show=0):
             sv = sv[~np.isnan(sv)]
 
             obs_mean.append(np.mean(ov) if len(ov) else np.nan)
-            obs_min.append(np.min(ov) if len(ov) else np.nan)
-            obs_max.append(np.max(ov) if len(ov) else np.nan)
+            obs_std.append(np.std(ov, ddof=1) if len(ov) > 1 else 0.0)
 
             sim_mean.append(np.mean(sv) if len(sv) else np.nan)
-            sim_min.append(np.min(sv) if len(sv) else np.nan)
-            sim_max.append(np.max(sv) if len(sv) else np.nan)
+            sim_std.append(np.std(sv, ddof=1) if len(sv) > 1 else 0.0)
 
+        obs_mean, obs_std = np.array(obs_mean), np.array(obs_std)
+        sim_mean, sim_std = np.array(sim_mean), np.array(sim_std)
+
+
+        # plotting
         plt.figure(figsize=(8, 5))
         # Shade background by season (Fall/Winter/Spring/Summer, water-year order)
         season_colors = {"Fall": "goldenrod", "Winter": "steelblue", "Spring": "mediumseagreen", "Summer": "indianred"}
@@ -414,10 +499,13 @@ def seasonal_plot_tsoi(obs, sim, site, depths, vari, show=0):
         for start, end, sname in season_bounds:
             plt.axvspan(start, end, color=season_colors[sname], alpha=0.08)
         plt.plot(x, obs_mean, "-", color="gray", label=f"Observed - {act_val*100:.0f}cm", linewidth=2)
-        plt.fill_between(x, obs_min, obs_max, color="gray", alpha=0.3)
+        # Wider band first (2 sigma), narrower band drawn on top (1 sigma)
+        plt.fill_between(x, obs_mean - 2 * obs_std, obs_mean + 2 * obs_std, color="gray", alpha=0.15)
+        plt.fill_between(x, obs_mean - obs_std, obs_mean + obs_std, color="gray", alpha=0.3)
 
         plt.plot(x, sim_mean, "-", color="crimson", label=f"Simulated - {sim_depth*100:.0f}cm", linewidth=2)
-        plt.fill_between(x, sim_min, sim_max, color="crimson", alpha=0.3)
+        plt.fill_between(x, sim_mean - 2 * sim_std, sim_mean + 2 * sim_std, color="crimson", alpha=0.15)
+        plt.fill_between(x, sim_mean - sim_std, sim_mean + sim_std, color="crimson", alpha=0.3)
 
         plt.xticks(x, month_labels)
         plt.xlabel("Month")
@@ -459,10 +547,10 @@ def seasonal_plot_h2osoi_full(obs, sim, site, depths, vari, show=0):
         obs_monthly = obs_sel.resample(time="1ME").mean(skipna=True)
         sim_monthly = sim_sel.resample(time="1ME").mean(skipna=True)
 
-        obs_mean, obs_min, obs_max = [], [], []
-        sim_mean, sim_min, sim_max = [], [], []
+        obs_mean, obs_std = [], []
+        sim_mean, sim_std = [], []
 
-        
+
         for m in month_order:
             ov = obs_monthly.sel(time=obs_monthly["time"].dt.month == m).values
             sv = sim_monthly.sel(time=sim_monthly["time"].dt.month == m).values
@@ -470,12 +558,13 @@ def seasonal_plot_h2osoi_full(obs, sim, site, depths, vari, show=0):
             sv = sv[~np.isnan(sv)]
 
             obs_mean.append(np.mean(ov) if len(ov) else np.nan)
-            obs_min.append(np.min(ov) if len(ov) else np.nan)
-            obs_max.append(np.max(ov) if len(ov) else np.nan)
+            obs_std.append(np.std(ov, ddof=1) if len(ov) > 1 else 0.0)
 
             sim_mean.append(np.mean(sv) if len(sv) else np.nan)
-            sim_min.append(np.min(sv) if len(sv) else np.nan)
-            sim_max.append(np.max(sv) if len(sv) else np.nan)
+            sim_std.append(np.std(sv, ddof=1) if len(sv) > 1 else 0.0)
+
+        obs_mean, obs_std = np.array(obs_mean), np.array(obs_std)
+        sim_mean, sim_std = np.array(sim_mean), np.array(sim_std)
 
         plt.figure(figsize=(8, 5))
         # Shade background by season (Fall/Winter/Spring/Summer, water-year order)
@@ -484,11 +573,13 @@ def seasonal_plot_h2osoi_full(obs, sim, site, depths, vari, show=0):
         for start, end, sname in season_bounds:
             plt.axvspan(start, end, color=season_colors[sname], alpha=0.08)
         plt.plot(x, obs_mean, "-", color="gray", label=f"Observed - {act_val*100:.0f}cm", linewidth=2)
-        plt.fill_between(x, obs_min, obs_max, color="gray", alpha=0.3)
+        plt.fill_between(x, obs_mean - 2 * obs_std, obs_mean + 2 * obs_std, color="gray", alpha=0.15)
+        plt.fill_between(x, obs_mean - obs_std, obs_mean + obs_std, color="gray", alpha=0.3)
 
         plt.plot(x, sim_mean, "-", color="crimson", label=f"Simulated - {sim_depth*100:.0f}cm", linewidth=2)
-        plt.fill_between(x, sim_min, sim_max, color="crimson", alpha=0.3)
-        
+        plt.fill_between(x, sim_mean - 2 * sim_std, sim_mean + 2 * sim_std, color="crimson", alpha=0.15)
+        plt.fill_between(x, sim_mean - sim_std, sim_mean + sim_std, color="crimson", alpha=0.3)
+
         #season_rmse = rmse_from_means(obs_mean, sim_mean)
         #print(season_rmse)
 
